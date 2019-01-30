@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015 - 2016 DisplayLink (UK) Ltd.
  *
@@ -28,7 +29,7 @@ void evdi_stats_init(struct evdi_device *evdi)
 {
 	int i, retval;
 
-	DRM_INFO("evdi: evdi_stats_init\n");
+	DRM_INFO("evdi: %s\n", __func__);
 	atomic_set(&evdi->frame_count, 0);
 	for (i = 0; i < ARRAY_SIZE(evdi_device_attributes); i++) {
 		retval =
@@ -44,7 +45,7 @@ void evdi_stats_cleanup(struct evdi_device *evdi)
 {
 	int i;
 
-	DRM_INFO("evdi: evdi_stats_cleanup\n");
+	DRM_INFO("evdi: %s\n", __func__);
 
 	for (i = 0; i < ARRAY_SIZE(evdi_device_attributes); i++)
 		device_remove_file(evdi->ddev->primary->kdev,

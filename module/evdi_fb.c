@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Red Hat
  * Copyright (c) 2015 - 2016 DisplayLink (UK) Ltd.
@@ -14,7 +15,6 @@
 #include <linux/fb.h>
 #include <linux/dma-buf.h>
 #include <linux/version.h>
-
 #include <drm/drmP.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_crtc_helper.h>
@@ -75,7 +75,7 @@ struct drm_clip_rect evdi_framebuffer_sanitize_rect(
 	return rect;
 }
 
-int evdi_handle_damage(struct evdi_framebuffer *fb,
+static int evdi_handle_damage(struct evdi_framebuffer *fb,
 		       int x, int y, int width, int height)
 {
 	const struct drm_clip_rect dirty_rect = { x, y, x + width, y + height };
@@ -88,8 +88,8 @@ int evdi_handle_damage(struct evdi_framebuffer *fb,
 
 	if (!fb->active)
 		return 0;
-	evdi_set_new_scanout_buffer(evdi, fb);
-	evdi_flip_scanout_buffer(evdi);
+	evdi_painter_set_new_scanout_buffer(evdi, fb);
+	evdi_painter_commit_scanout_buffer(evdi);
 	evdi_painter_mark_dirty(evdi, &rect);
 
 	return 0;
@@ -97,39 +97,30 @@ int evdi_handle_damage(struct evdi_framebuffer *fb,
 
 static int evdi_fb_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
-	unsigned long vma_start = vma->vm_start;
-	unsigned long vma_size = vma->vm_end - vma->vm_start;
-	unsigned long vma_page_cnt = vma_size >> PAGE_SHIFT;
-	unsigned long smem_page_cnt = info->fix.smem_len >> PAGE_SHIFT;
-	unsigned long smem_offset = vma->vm_pgoff << PAGE_SHIFT;
-	unsigned long smem_pos;
+	unsigned long start = vma->vm_start;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+	unsigned long page, pos;
 
-	if (smem_page_cnt < vma->vm_pgoff)
+	if (offset > info->fix.smem_len ||
+	    size > info->fix.smem_len - offset)
 		return -EINVAL;
 
-	if (vma_page_cnt > smem_page_cnt - vma->vm_pgoff)
-		return -EINVAL;
+	pos = (unsigned long)info->fix.smem_start + offset;
 
-	smem_pos = (unsigned long)info->fix.smem_start + smem_offset;
+	pr_notice("mmap() framebuffer addr:%lu size:%lu\n", pos, size);
 
-	pr_notice("mmap() framebuffer addr:%lu size:%lu\n", smem_pos, vma_size);
-
-	while (vma_size > 0) {
-		unsigned long page = vmalloc_to_pfn((void *)smem_pos);
-
-		if (remap_pfn_range(vma,
-				    vma_start,
-				    page,
-				    PAGE_SIZE,
-				    PAGE_SHARED))
+	while (size > 0) {
+		page = vmalloc_to_pfn((void *)pos);
+		if (remap_pfn_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
 			return -EAGAIN;
 
-		vma_start += PAGE_SIZE;
-		smem_pos += PAGE_SIZE;
-		if (vma_size > PAGE_SIZE)
-			vma_size -= PAGE_SIZE;
+		start += PAGE_SIZE;
+		pos += PAGE_SIZE;
+		if (size > PAGE_SIZE)
+			size -= PAGE_SIZE;
 		else
-			vma_size = 0;
+			size = 0;
 	}
 
 	return 0;
@@ -237,12 +228,12 @@ static int evdi_user_framebuffer_dirty(struct drm_framebuffer *fb,
 
 	if (ufb->obj->base.import_attach) {
 		ret =
-			dma_buf_begin_cpu_access(
-					ufb->obj->base.import_attach->dmabuf,
+		    dma_buf_begin_cpu_access(
+			ufb->obj->base.import_attach->dmabuf,
 #if KERNEL_VERSION(4, 6, 0) > LINUX_VERSION_CODE
-					0, ufb->obj->base.size,
+			0, ufb->obj->base.size,
 #endif
-					DMA_FROM_DEVICE);
+			DMA_FROM_DEVICE);
 		if (ret)
 			goto unlock;
 	}
@@ -281,9 +272,6 @@ static void evdi_user_framebuffer_destroy(struct drm_framebuffer *fb)
 	struct evdi_framebuffer *ufb = to_evdi_fb(fb);
 
 	EVDI_CHECKPT();
-	if (ufb->obj->vmapping)
-		evdi_gem_vunmap(ufb->obj);
-
 	if (ufb->obj)
 		drm_gem_object_unreference_unlocked(&ufb->obj->base);
 
@@ -308,7 +296,11 @@ evdi_framebuffer_init(struct drm_device *dev,
 		      struct evdi_gem_object *obj)
 {
 	ufb->obj = obj;
+#if KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE
 	drm_helper_mode_fill_fb_struct(&ufb->base, mode_cmd);
+#else
+	drm_helper_mode_fill_fb_struct(dev, &ufb->base, mode_cmd);
+#endif
 	return drm_framebuffer_init(dev, &ufb->base, &evdifb_funcs);
 }
 
@@ -375,9 +367,13 @@ static int evdifb_create(struct drm_fb_helper *helper,
 	info->fix.smem_len = size;
 	info->fix.smem_start = (unsigned long)ufbdev->ufb.obj->vmapping;
 
-	info->flags = FBINFO_DEFAULT | FBINFO_CAN_FORCE_OUTPUT;
+	info->flags = FBINFO_DEFAULT;
 	info->fbops = &evdifb_ops;
+#if KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE
 	drm_fb_helper_fill_fix(info, fb->pitches[0], fb->depth);
+#else
+	drm_fb_helper_fill_fix(info, fb->pitches[0], fb->format->depth);
+#endif
 	drm_fb_helper_fill_var(info, &ufbdev->helper, sizes->fb_width,
 			       sizes->fb_height);
 
@@ -437,9 +433,14 @@ int evdi_fbdev_init(struct drm_device *dev)
 	drm_fb_helper_prepare(dev, &ufbdev->helper, &evdi_fb_helper_funcs);
 #else
 	ufbdev->helper.funcs = &evdi_fb_helper_funcs;
+	ufbdev->helper.dev = dev;
 #endif
 
+#if KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE
 	ret = drm_fb_helper_init(dev, &ufbdev->helper, 1, 1);
+#else
+	ret = drm_fb_helper_init(dev, &ufbdev->helper, 1);
+#endif
 	if (ret) {
 		kfree(ufbdev);
 		return ret;
@@ -487,16 +488,22 @@ void evdi_fbdev_unplug(struct drm_device *dev)
 	}
 }
 
-#if KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
-static int evdi_fb_get_bpp(u32 format)
+int evdi_fb_get_bpp(uint32_t format)
 {
+#if KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
 	const struct drm_format_info *info = drm_format_info(format);
 
 	if (!info)
 		return 0;
 	return info->cpp[0] * 8;
-}
+#else
+	unsigned int depth;
+	int bpp;
+
+	drm_fb_get_bpp_depth(format, &depth, &bpp);
+	return bpp;
 #endif
+}
 
 struct drm_framebuffer *evdi_fb_user_fb_create(
 					struct drm_device *dev,
@@ -511,15 +518,7 @@ struct drm_framebuffer *evdi_fb_user_fb_create(
 	struct evdi_framebuffer *ufb;
 	int ret;
 	uint32_t size;
-
-#if KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
 	int bpp = evdi_fb_get_bpp(mode_cmd->pixel_format);
-#else
-	unsigned int depth;
-	int bpp;
-
-	drm_fb_get_bpp_depth(mode_cmd->pixel_format, &depth, &bpp);
-#endif
 
 	if (bpp != 32) {
 		EVDI_ERROR("Unsupported bpp (%d)\n", bpp);

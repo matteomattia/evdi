@@ -1,6 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Red Hat
- * Copyright (c) 2015 - 2016 DisplayLink (UK) Ltd.
+ * Copyright (c) 2015 - 2018 DisplayLink (UK) Ltd.
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License v2. See the file COPYING in the main directory of this archive for
@@ -14,6 +15,7 @@
 
 #include "evdi_drv.h"
 #include "evdi_drm.h"
+#include "evdi_params.h"
 #include "evdi_debug.h"
 
 MODULE_AUTHOR("DisplayLink (UK) Ltd.");
@@ -61,9 +63,14 @@ static const struct file_operations evdi_driver_fops = {
 
 static struct drm_driver driver = {
 	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_PRIME,
+	/* In 4.12+, loading moves from .load() to open-coding */
+#if KERNEL_VERSION(4, 12, 0) > LINUX_VERSION_CODE
 	.load = evdi_driver_load,
+#endif
 	.unload = evdi_driver_unload,
-	.preclose = evdi_driver_preclose,
+	.preclose = evdi_driver_close,
+
+	.postclose = evdi_driver_close,
 
 	/* gem hooks */
 	.gem_free_object = evdi_gem_free_object,
@@ -114,11 +121,66 @@ static void evdi_add_device(void)
 	evdi_context.dev_count++;
 }
 
+static int evdi_add_devices(unsigned int val)
+{
+	if (val == 0) {
+		EVDI_WARN("Adding 0 devices has no effect\n");
+		return 0;
+	}
+	if (val > EVDI_DEVICE_COUNT_MAX - evdi_context.dev_count) {
+		EVDI_ERROR("Evdi device add failed. Too many devices.\n");
+		return -EINVAL;
+	}
+
+	EVDI_DEBUG("Increasing device count to %u\n",
+		   evdi_context.dev_count + val);
+	while (val--)
+		evdi_add_device();
+	return 0;
+}
+
+/*
+ * In 4.12+, the DRM core moves from the load() callback to requiring drivers
+ * to open-code their registration in their probe callback.
+ *
+ * Most of our setup happens before registration but the stats require
+ * registration first.
+ */
+#if KERNEL_VERSION(4, 12, 0) <= LINUX_VERSION_CODE
+static int evdi_platform_probe(struct platform_device *pdev)
+{
+	struct drm_device *dev;
+	int ret;
+
+	EVDI_CHECKPT();
+
+	dev = drm_dev_alloc(&driver, &pdev->dev);
+	if (IS_ERR(dev))
+		return PTR_ERR(dev);
+
+	ret = evdi_driver_setup_early(dev);
+	if (ret)
+		goto err_free;
+
+	ret = drm_dev_register(dev, 0);
+	if (ret)
+		goto err_free;
+
+	evdi_driver_setup_late(dev);
+
+	return 0;
+
+err_free:
+	drm_dev_unref(dev);
+	return ret;
+}
+#else
 static int evdi_platform_probe(struct platform_device *pdev)
 {
 	EVDI_CHECKPT();
 	return drm_platform_init(&driver, pdev);
 }
+#endif
 
 static int evdi_platform_remove(struct platform_device *pdev)
 {
@@ -126,7 +188,11 @@ static int evdi_platform_remove(struct platform_device *pdev)
 	    (struct drm_device *)platform_get_drvdata(pdev);
 	EVDI_CHECKPT();
 
+#if KERNEL_VERSION(4, 14, 0) > LINUX_VERSION_CODE
 	drm_unplug_dev(drm_dev);
+#else
+	drm_dev_unplug(drm_dev);
+#endif
 
 	return 0;
 }
@@ -177,24 +243,16 @@ static ssize_t add_store(__always_unused struct device *dev,
 			 const char *buf, size_t count)
 {
 	unsigned int val;
+	int ret;
 
 	if (kstrtouint(buf, 10, &val)) {
 		EVDI_ERROR("Invalid device count \"%s\"\n", buf);
 		return -EINVAL;
 	}
-	if (val == 0) {
-		EVDI_WARN("Adding 0 devices has no effect\n");
-		return count;
-	}
-	if (evdi_context.dev_count + val >= EVDI_DEVICE_COUNT_MAX) {
-		EVDI_ERROR("Evdi device add failed. Too many devices.\n");
-		return -EINVAL;
-	}
 
-	EVDI_DEBUG("Increasing device count to %u\n",
-		   evdi_context.dev_count + val);
-	while (val--)
-		evdi_add_device();
+	ret = evdi_add_devices(val);
+	if (ret)
+		return ret;
 
 	return count;
 }
@@ -246,9 +304,17 @@ static struct device_attribute evdi_device_attributes[] = {
 
 static int __init evdi_init(void)
 {
-	int i;
+	int i, ret;
 
 	EVDI_INFO("Initialising logging on level %u\n", evdi_loglevel);
+
+#if KERNEL_VERSION(4, 0, 0) <= LINUX_VERSION_CODE
+	EVDI_INFO("Atomic driver:%s",
+		(driver.driver_features & DRIVER_ATOMIC) ? "yes" : "no");
+#else
+	EVDI_INFO("Atomic driver: unsupported");
+#endif
+
 	evdi_context.root_dev = root_device_register("evdi");
 	if (!PTR_RET(evdi_context.root_dev))
 		for (i = 0; i < ARRAY_SIZE(evdi_device_attributes); i++) {
@@ -256,7 +322,14 @@ static int __init evdi_init(void)
 					   &evdi_device_attributes[i]);
 		}
 
-	return platform_driver_register(&evdi_platform_driver);
+	ret = platform_driver_register(&evdi_platform_driver);
+	if (ret)
+		return ret;
+
+	if (evdi_initial_device_count)
+		return evdi_add_devices(evdi_initial_device_count);
+
+	return 0;
 }
 
 static void __exit evdi_exit(void)

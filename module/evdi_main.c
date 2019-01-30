@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Red Hat
  * Copyright (c) 2015 - 2016 DisplayLink (UK) Ltd.
@@ -15,8 +16,7 @@
 #include "evdi_drv.h"
 #include "evdi_cursor.h"
 
-int evdi_driver_load(struct drm_device *dev,
-		     __always_unused unsigned long flags)
+int evdi_driver_setup_early(struct drm_device *dev)
 {
 	struct platform_device *platdev = NULL;
 	struct evdi_device *evdi;
@@ -30,7 +30,7 @@ int evdi_driver_load(struct drm_device *dev,
 	evdi->ddev = dev;
 	dev->dev_private = evdi;
 
-	ret =  evdi_cursor_alloc(&evdi->cursor);
+	ret =  evdi_cursor_init(&evdi->cursor);
 	if (ret)
 		goto err;
 
@@ -52,8 +52,6 @@ int evdi_driver_load(struct drm_device *dev,
 	if (ret)
 		goto err_fb;
 
-	evdi_stats_init(evdi);
-
 	drm_kms_helper_poll_init(dev);
 
 	platdev = to_platform_device(dev->dev);
@@ -71,14 +69,43 @@ err:
 	return ret;
 }
 
+void evdi_driver_setup_late(struct drm_device *dev)
+{
+	evdi_stats_init(dev->dev_private);
+}
+
+#if KERNEL_VERSION(4, 12, 0) > LINUX_VERSION_CODE
+int evdi_driver_load(struct drm_device *dev,
+		     __always_unused unsigned long flags)
+{
+	int ret;
+
+	ret =  evdi_driver_setup_early(dev);
+	if (ret)
+		return ret;
+
+	evdi_driver_setup_late(dev);
+	return 0;
+
+}
+#endif
+
+#if KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE
 int evdi_driver_unload(struct drm_device *dev)
+#else
+void evdi_driver_unload(struct drm_device *dev)
+#endif
 {
 	struct evdi_device *evdi = dev->dev_private;
 
 	EVDI_CHECKPT();
 
+#if KERNEL_VERSION(4, 14, 0) > LINUX_VERSION_CODE
 	drm_vblank_cleanup(dev);
+#endif
+
 	drm_kms_helper_poll_fini(dev);
+
 #if KERNEL_VERSION(4, 8, 0) <= LINUX_VERSION_CODE
 
 #elif KERNEL_VERSION(4, 7, 0) <= LINUX_VERSION_CODE
@@ -86,7 +113,6 @@ int evdi_driver_unload(struct drm_device *dev)
 #else
 	drm_connector_unplug_all(dev);
 #endif
-
 	evdi_fbdev_unplug(dev);
 	if (evdi->cursor)
 		evdi_cursor_free(evdi->cursor);
@@ -96,10 +122,12 @@ int evdi_driver_unload(struct drm_device *dev)
 	evdi_modeset_cleanup(dev);
 
 	kfree(evdi);
+#if KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE
 	return 0;
+#endif
 }
 
-void evdi_driver_preclose(struct drm_device *drm_dev, struct drm_file *file)
+void evdi_driver_close(struct drm_device *drm_dev, struct drm_file *file)
 {
 	struct evdi_device *evdi = drm_dev->dev_private;
 
@@ -107,4 +135,3 @@ void evdi_driver_preclose(struct drm_device *drm_dev, struct drm_file *file)
 	if (evdi)
 		evdi_painter_close(evdi, file);
 }
-

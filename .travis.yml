@@ -1,6 +1,7 @@
 sudo: false
 
-language: cpp
+language: c
+cache: ccache
 
 env:
   - KVER=3.16
@@ -17,9 +18,19 @@ env:
   - KVER=4.7
   - KVER=4.8
   - KVER=4.9
+  - KVER=4.10
+  - KVER=4.11
+  - KVER=4.12
+  - KVER=4.13
+  - KVER=4.14
+  - KVER=4.15
+  - KVER=4.16
+  - KVER=4.17
   - KVER=master
 
 matrix:
+  allow_failures:
+    - env: KVER=master
   include:
     - env: StyleCheck
       script: ./ci/run_style_check
@@ -31,6 +42,7 @@ addons:
     packages:
       - bc
       - g++-4.8
+      - libelf-dev
 
 script:
   - CC=gcc-4.8 ./ci/build_against_kernel ${KVER}

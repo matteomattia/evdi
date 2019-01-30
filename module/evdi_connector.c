@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Red Hat
  * Copyright (c) 2015 - 2017 DisplayLink (UK) Ltd.
@@ -31,11 +32,20 @@ static int evdi_get_modes(struct drm_connector *connector)
 	edid = (struct edid *)evdi_painter_get_edid_copy(evdi);
 
 	if (!edid) {
+#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+		drm_connector_update_edid_property(connector, NULL);
+#else
 		drm_mode_connector_update_edid_property(connector, NULL);
+#endif
 		return 0;
 	}
 
+#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+	ret = drm_connector_update_edid_property(connector, edid);
+#else
 	ret = drm_mode_connector_update_edid_property(connector, edid);
+#endif
+
 	if (!ret)
 		drm_add_edid_modes(connector, edid);
 	else
@@ -45,7 +55,7 @@ static int evdi_get_modes(struct drm_connector *connector)
 	return ret;
 }
 
-static int evdi_mode_valid(struct drm_connector *connector,
+static enum drm_mode_status evdi_mode_valid(struct drm_connector *connector,
 			   struct drm_display_mode *mode)
 {
 	struct evdi_device *evdi = connector->dev->dev_private;
@@ -83,23 +93,18 @@ static struct drm_encoder *evdi_best_single_encoder(struct drm_connector
 						    *connector)
 {
 	int enc_id = connector->encoder_ids[0];
-	struct drm_mode_object *obj;
-	struct drm_encoder *encoder;
 
-	obj =
-	    drm_mode_object_find(connector->dev, enc_id,
-				 DRM_MODE_OBJECT_ENCODER);
-	if (!obj)
-		return NULL;
-
-	encoder = obj_to_encoder(obj);
-	return encoder;
+	return drm_encoder_find(connector->dev,
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+				 NULL,
+#endif
+				 enc_id);
 }
 
 static int evdi_connector_set_property(
-				__always_unused struct drm_connector *connector,
-			       __always_unused struct drm_property *property,
-			       __always_unused uint64_t val)
+			__always_unused struct drm_connector *connector,
+			__always_unused struct drm_property *property,
+			__always_unused uint64_t val)
 {
 	return 0;
 }
@@ -148,7 +153,12 @@ int evdi_connector_init(struct drm_device *dev, struct drm_encoder *encoder)
 #else
 	drm_sysfs_connector_add(connector);
 #endif
+
+#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE
+	drm_connector_attach_encoder(connector, encoder);
+#else
 	drm_mode_connector_attach_encoder(connector, encoder);
+#endif
 
 #if KERNEL_VERSION(4, 9, 0) > LINUX_VERSION_CODE
 	drm_object_attach_property(&connector->base,
